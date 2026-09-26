@@ -6,9 +6,9 @@
 # The only thing the tunnel needs to reach is ttyd on loopback:
 #   http://127.0.0.1:7681
 #
-# IMPORTANT: this hostname exposes a shell (herdr -> your user). Add a
-# Zero Trust -> Access -> Applications policy for the hostname BEFORE using it,
-# and/or set TTYD_CREDENTIAL=user:pass. Never leave it open to the internet.
+# SECURITY: this hostname exposes a shell (herdr -> your user). Enable ttyd
+# HTTP basic auth (TTYD_CREDENTIAL=user:pass) BEFORE using it. A Zero Trust
+# Access policy is optional extra defense. Never expose ttyd without auth.
 
 tunnel: REPLACE-WITH-TUNNEL-NAME-OR-UUID
 credentials-file: /home/ubuntu/.cloudflared/REPLACE-WITH-TUNNEL-UUID.json

@@ -8,7 +8,9 @@ Wants=network-online.target
 User=@@USER@@
 Environment=TERM=xterm-256color
 Environment=HOME=@@HOME@@
+@@ENVFILE@@
 # Loopback only. The Cloudflare Tunnel is what exposes it.
+# With TTYD_CREDENTIAL set, basic auth is enabled via: -c ${TTYD_CREDENTIAL}
 ExecStart=@@TTYD_BIN@@ -i 127.0.0.1 -p @@PORT@@ -W -t titleFixed=Herdr@@CRED@@ @@HERDR_BIN@@
 Restart=on-failure
 RestartSec=2

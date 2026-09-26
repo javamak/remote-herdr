@@ -10,14 +10,15 @@ It installs and hardens:
 - **[pi](https://www.npmjs.com/package/@earendil-works/pi-coding-agent)** — the AI
   coding agent that runs inside a Herdr pane.
 - **ttyd** — a terminal-to-HTTP gateway so you can use the same workspace from a
-  browser. It binds to **loopback only**; a **Cloudflare Tunnel** provides the
-  encrypted public front door.
+  browser, protected by **HTTP basic auth** (username/password). It binds to
+  **loopback only**; a **Cloudflare Tunnel** provides the encrypted public front
+  door.
 - **Hardening** — key-only SSH, no root login, default-deny firewall, fail2ban,
   unattended security upgrades, and conservative network sysctls.
 
 ```
    your laptop / phone
-          │  https://herdr.example.com  (Cloudflare edge + Access)
+          │  https://herdr.example.com  (Cloudflare edge; ttyd basic auth)
           ▼
    cloudflared tunnel
           │  http://127.0.0.1:7681  (loopback only)
@@ -160,12 +161,20 @@ cd ~/remote-herdr && ./setup.sh cloudflared   # installs the service
 
 Then browse to **`https://herdr.example.com`**.
 
-> ⚠️ **Before you share the URL, add a Cloudflare Access policy.** A public
-> hostname pointing at ttyd = a shell on your server for anyone who finds it.
-> Zero Trust → Access → Applications → Self-hosted, hostname
-> `herdr.example.com`, policy `Emails = you@example.com` with MFA/OTP. As
-> defense in depth you can also set `TTYD_CREDENTIAL=user:pass` when running the
-> `ttyd` phase.
+> ⚠️ **Auth is ttyd HTTP basic auth.** A public hostname pointing at ttyd = a
+> shell on your server, so set a strong credential in the `ttyd` phase before
+> the tunnel goes live. Pass it over stdin so it never lands in a process list:
+>
+> ```bash
+> ssh vps1 'cd ~/remote-herdr && ./setup.sh install ttyd'  # once, passwordless
+> printf '%s' 'herdr:<strong-password>' | ssh vps1 \
+>   'cd ~/remote-herdr && IFS= read -r c; TTYD_CREDENTIAL="$c" ./setup.sh ttyd'
+> ```
+>
+> The secret is stored in `/etc/ttyd/auth.env` (root-only, `0600`) and referenced
+> from the unit as `${TTYD_CREDENTIAL}`, so the world-readable unit file never
+> contains the password. Re-run the second command to rotate. Cloudflare Access
+> is optional extra defense, not required.
 
 ---
 
@@ -176,7 +185,15 @@ All configuration is via environment variables, forwardable through
 
 ```bash
 TTYD_PORT=8080 SSH_ALLOW_USERS=ubuntu ./bootstrap.sh vps1
-TTYD_CREDENTIAL='me:s3cret' ./bootstrap.sh vps1 ttyd   # add HTTP basic auth
+```
+
+`TTYD_CREDENTIAL` and `TUNNEL_TOKEN` are secrets and are **not** forwarded by
+`bootstrap.sh`; set them directly on the VPS (piping over stdin keeps them out
+of the process list):
+
+```bash
+printf '%s' 'me:s3cret' | ssh vps1 \
+  'cd ~/remote-herdr && IFS= read -r c; TTYD_CREDENTIAL="$c" ./setup.sh ttyd'
 ```
 
 | Variable | Default | Meaning |
@@ -184,16 +201,16 @@ TTYD_CREDENTIAL='me:s3cret' ./bootstrap.sh vps1 ttyd   # add HTTP basic auth
 | `TARGET_USER` | current user | User that owns the workspace and runs the services |
 | `TTYD_PORT` | `7681` | Loopback port for ttyd (the tunnel origin) |
 | `SSH_ALLOW_USERS` | `TARGET_USER` | Value written to sshd `AllowUsers` |
-| `TTYD_CREDENTIAL` | *(none)* | Optional `user:pass` basic auth on ttyd |
+| `TTYD_CREDENTIAL` | *(none)* | `user:pass` HTTP basic auth for ttyd (**auth for the web path**) |
 | `NODE_MAJOR` | `22` | Node.js major installed from NodeSource (pi needs ≥ 22.19) |
 | `ALLOW_OPENSSH` | `1` | Keep port 22 open in ufw |
 | `TUNNEL_HOSTNAME` | `herdr.example.com` | Public hostname the tunnel serves |
 | `TUNNEL_TOKEN` | *(none)* | Dashboard-managed tunnel token; installs the connector service |
 | `TUNNEL_CONFIG` | `~/.cloudflared/config.yml` | Locally-managed tunnel config path |
 
-> `TUNNEL_TOKEN` is intentionally **not** forwarded by `bootstrap.sh` (it would
-> leak into the remote process list). Set it on the VPS and run
-> `./setup.sh cloudflared` there.
+> `TUNNEL_TOKEN` and `TTYD_CREDENTIAL` are intentionally **not** forwarded by
+> `bootstrap.sh` (they would leak into the remote process list). Set them on the
+> VPS and run `./setup.sh cloudflared` / `./setup.sh ttyd` there.
 
 ---
 
@@ -258,19 +275,23 @@ proxies to **ttyd on loopback**. The only value you need is:
 Service:  http://127.0.0.1:7681
 ```
 
-Recommended hardening for the public hostname:
+Recommended setup for the public hostname:
 
-1. **Cloudflare Access policy** (Zero Trust → Access → Applications) —
-   email/SSO + MFA. Without it the hostname is public.
-2. **Basic auth on ttyd** — `TTYD_CREDENTIAL=user:pass ./setup.sh ttyd`.
-3. Keep ttyd bound to `127.0.0.1` — never change `-i 127.0.0.1`.
-4. If you ever put Cloudflare in front with "Full" TLS mode, ttyd is still plain
+1. **Set a strong ttyd credential** (`TTYD_CREDENTIAL=user:pass`) — this is your
+   login. The browser will show a native username/password prompt.
+2. **Keep ttyd bound to `127.0.0.1`** — never change `-i 127.0.0.1`.
+3. **Optional:** add a Cloudflare Access policy if you also want SSO/MFA in
+   front of basic auth.
+4. Basic auth on the public internet is brute-forceable, so use a long random
+   password (≥ 20 chars) and consider a Cloudflare rate-limiting / WAF rule.
+5. If you ever put Cloudflare in front with "Full" TLS mode, ttyd is still plain
    HTTP on loopback; `noTLSVerify: true` in the example config covers this.
 
-Quick sanity checks from the VPS:
+Quick sanity checks from the VPS (401 without credentials, 200 with):
 
 ```bash
-curl -sS -o /dev/null -w '%{http_code}\n' http://127.0.0.1:7681   # 200
+curl -sS -o /dev/null -w '%{http_code}\n' http://127.0.0.1:7681          # 401
+curl -sS -o /dev/null -w '%{http_code}\n' -u user:pass http://127.0.0.1:7681  # 200
 sudo journalctl -u cloudflared -n 50 --no-pager
 ```
 
@@ -307,8 +328,10 @@ detach/close, reopen later — the agent is still running.
 - [x] Agents run as a non-root user.
 - [x] ttyd binds `127.0.0.1` only; the port is not in the firewall allowlist.
 - [x] Public access goes through a Cloudflare Tunnel, not an open port.
-- [ ] **Cloudflare Access policy on `herdr.example.com`** (email/SSO + MFA).
-- [ ] Optional defense-in-depth: `TTYD_CREDENTIAL=user:pass`.
+- [x] ttyd requires HTTP basic auth (`TTYD_CREDENTIAL`), secret stored in a
+      root-only `/etc/ttyd/auth.env`.
+- [ ] Use a long random ttyd password (≥ 20 chars).
+- [ ] Optional: Cloudflare Access policy for SSO/MFA on top of basic auth.
 - [ ] Review `cloudflared update` / `herdr update` / `npm update -g` regularly.
 - [ ] Back up `~/.pi/agent` (credentials, sessions) and `~/.config/herdr`.
 
@@ -321,6 +344,7 @@ detach/close, reopen later — the agent is still running.
 | `herdr: command not found` over SSH | Add `~/.local/bin` to `PATH` (the installer does this in `~/.bashrc`); non-login shells may need `export PATH="$HOME/.local/bin:$PATH"` |
 | ttyd page loads but herdr exits | Herdr client can't find the server socket. Check `systemctl --user status herdr` and that `~/.config/herdr/herdr.sock` exists |
 | `systemctl --user` fails over SSH | `export XDG_RUNTIME_DIR=/run/user/$(id -u)` |
+| Browser keeps prompting / 401 | Username/password is wrong, or ttyd auth is set but you're not sending it. Verify `curl -u user:pass http://127.0.0.1:7681` returns 200, and rotate with `TTYD_CREDENTIAL=user:pass ./setup.sh ttyd` on the VPS. |
 | Tunnel shows 502 / bad gateway | ttyd isn't up or is on the wrong port: `ss -ltnp \| grep 7681`, `systemctl status ttyd`, ensure the tunnel origin is `http://127.0.0.1:7681` |
 | `cloudflared` service not present | No tunnel configured yet; run `TUNNEL_TOKEN=... ./setup.sh cloudflared` or create `~/.cloudflared/config.yml` then re-run |
 | Check connector logs | `sudo journalctl -u cloudflared -n 100 --no-pager` |

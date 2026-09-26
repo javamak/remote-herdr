@@ -184,12 +184,26 @@ phase_services() {
 phase_ttyd() {
   command -v ttyd >/dev/null 2>&1 || die "ttyd is not installed (run: ./setup.sh install)"
   log "Installing ttyd service on 127.0.0.1:${TTYD_PORT}"
-  local herdr_bin ttyd_bin cred tmp
+  local herdr_bin ttyd_bin cred envfile tmp
   herdr_bin="${HOME}/.local/bin/herdr"
   ttyd_bin="$(command -v ttyd)"
   [ -x "$herdr_bin" ] || die "herdr binary not found at $herdr_bin"
+
+  # Basic auth: keep the secret out of the world-readable unit file by storing
+  # it in a root-only env file and letting systemd expand ${TTYD_CREDENTIAL}.
   cred=""
-  [ -n "$TTYD_CREDENTIAL" ] && cred=" -c ${TTYD_CREDENTIAL}"
+  envfile=""
+  if [ -n "$TTYD_CREDENTIAL" ]; then
+    log "Enabling HTTP basic auth for ttyd"
+    sudo install -d -m 0755 /etc/ttyd
+    printf 'TTYD_CREDENTIAL=%s\n' "$TTYD_CREDENTIAL" | sudo tee /etc/ttyd/auth.env >/dev/null
+    sudo chmod 0600 /etc/ttyd/auth.env
+    cred=" -c \${TTYD_CREDENTIAL}"
+    envfile="EnvironmentFile=/etc/ttyd/auth.env"
+  else
+    warn "No TTYD_CREDENTIAL set — ttyd will have NO authentication. Only safe behind an authenticated proxy."
+    sudo rm -f /etc/ttyd/auth.env
+  fi
 
   tmp="$(mktemp)"
   sed -e "s|@@USER@@|${TARGET_USER}|g" \
@@ -197,6 +211,7 @@ phase_ttyd() {
       -e "s|@@TTYD_BIN@@|${ttyd_bin}|g" \
       -e "s|@@HERDR_BIN@@|${herdr_bin}|g" \
       -e "s|@@PORT@@|${TTYD_PORT}|g" \
+      -e "s|@@ENVFILE@@|${envfile}|g" \
       -e "s|@@CRED@@|${cred}|g" \
       "$FILES_DIR/systemd/ttyd.service.tmpl" > "$tmp"
   sudo install -m 0644 "$tmp" /etc/systemd/system/ttyd.service
@@ -285,9 +300,12 @@ cloudflared_instructions() {
         cloudflared tunnel route dns vps1 ${TUNNEL_HOSTNAME}
         ./setup.sh cloudflared        # installs/refreshes the service
 
-      SECURITY: ${TUNNEL_HOSTNAME} reaches a full shell. Add a
-      Zero Trust -> Access -> Applications policy for it (email/SSO + MFA)
-      BEFORE sharing the URL, and/or set TTYD_CREDENTIAL=user:pass.
+      SECURITY: ${TUNNEL_HOSTNAME} reaches a full shell. Enable ttyd HTTP basic
+      auth BEFORE sharing the URL:
+        printf '%s' 'user:pass' | ssh vps1 \
+          'cd ~/remote-herdr && IFS= read -r c; TTYD_CREDENTIAL="\$c" ./setup.sh ttyd'
+      A Zero Trust Access policy is optional extra defense. Never expose ttyd
+      without auth.
 EOF
 }
 
