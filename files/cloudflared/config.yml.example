@@ -1,0 +1,15 @@
+# Example cloudflared config for exposing ttyd privately through Cloudflare
+# Access. Copy to ~/.cloudflared/config.yml and fill in the placeholders.
+#
+# IMPORTANT: without a Cloudflare Access policy this URL is PUBLIC.
+# Add a Zero Trust -> Access -> Applications policy before using it.
+
+tunnel: vps1
+credentials-file: /home/ubuntu/.cloudflared/REPLACE-WITH-TUNNEL-UUID.json
+
+ingress:
+  - hostname: herdr.example.com
+    service: http://127.0.0.1:7681
+    originRequest:
+      noTLSVerify: true
+  - service: http_status:404

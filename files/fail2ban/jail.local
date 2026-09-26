@@ -1,0 +1,22 @@
+# jail.local — fail2ban overrides
+# Installed to /etc/fail2ban/jail.local
+#
+# Password auth is disabled, so the sshd jail mostly catches key-probing /
+# scanner noise. It is still worth having: it bans abusive sources and can
+# protect future services (e.g. a web terminal) too.
+
+[DEFAULT]
+# Debian/Ubuntu ship with the systemd backend; use it so we read the journal.
+backend = systemd
+bantime  = 1h
+findtime = 10m
+maxretry = 5
+# Only ever ban for a while; never permanently lock out an IP you might need.
+bantime.increment = true
+bantime.factor    = 2
+bantime.maxtime   = 1w
+
+[sshd]
+enabled = true
+port    = ssh
+mode    = aggressive

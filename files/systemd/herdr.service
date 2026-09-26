@@ -1,0 +1,15 @@
+[Unit]
+Description=Herdr headless server
+Documentation=https://herdr.dev
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/herdr server
+Restart=on-failure
+RestartSec=2
+Environment=HERDR_LOG=info
+
+[Install]
+WantedBy=default.target

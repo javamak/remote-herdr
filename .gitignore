@@ -1,0 +1,13 @@
+# Secrets & local overrides
+secrets/
+.env
+*.secret
+*.pem
+*.key
+
+# Cloudflare credentials
+files/cloudflared/*.json
+
+# rsync / editor noise
+.DS_Store
+*.swp
