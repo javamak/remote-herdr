@@ -11,8 +11,8 @@
 #   TTYD_PORT=8080 SSH_ALLOW_USERS=ubuntu ./bootstrap.sh vps1
 #   TTYD_CREDENTIAL='me:s3cret' ./bootstrap.sh vps1 ttyd
 #
-# TS_AUTHKEY is NOT forwarded (it would leak into the process list); set it on
-# the VPS and run `./setup.sh tailscale` there, or use `tailscale up` manually.
+# TUNNEL_TOKEN is NOT forwarded (it would leak into the process list); set it on
+# the VPS and run `./setup.sh cloudflared` there.
 
 set -Eeuo pipefail
 
@@ -42,7 +42,7 @@ rsync -az --delete \
 # Forward a whitelist of configuration variables.
 ENV_PAIRS=()
 for var in TARGET_USER TTYD_PORT SSH_ALLOW_USERS TTYD_CREDENTIAL NODE_MAJOR \
-           ALLOW_OPENSSH INSTALL_TAILSCALE_UP TS_HOSTNAME; do
+           ALLOW_OPENSSH TUNNEL_HOSTNAME TUNNEL_CONFIG; do
   if [ -n "${!var:-}" ]; then
     ENV_PAIRS+=("${var}=${!var}")
   fi

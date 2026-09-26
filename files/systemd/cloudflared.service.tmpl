@@ -1,0 +1,17 @@
+[Unit]
+Description=Cloudflare Tunnel for ttyd/Herdr
+Documentation=https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+@@USER_LINE@@
+@@ENV_LINE@@
+ExecStart=@@EXECSTART@@
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

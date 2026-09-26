@@ -10,16 +10,16 @@ It installs and hardens:
 - **[pi](https://www.npmjs.com/package/@earendil-works/pi-coding-agent)** — the AI
   coding agent that runs inside a Herdr pane.
 - **ttyd** — a terminal-to-HTTP gateway so you can use the same workspace from a
-  browser. It binds to **loopback only**; a private tunnel (Tailscale or
-  Cloudflare Access) provides the encrypted front door.
+  browser. It binds to **loopback only**; a **Cloudflare Tunnel** provides the
+  encrypted public front door.
 - **Hardening** — key-only SSH, no root login, default-deny firewall, fail2ban,
   unattended security upgrades, and conservative network sysctls.
 
 ```
    your laptop / phone
-          │  HTTPS (private)
+          │  https://herdr.example.com  (Cloudflare edge + Access)
           ▼
-   Tailscale Serve  ──or──  Cloudflare Tunnel + Access
+   cloudflared tunnel
           │  http://127.0.0.1:7681  (loopback only)
           ▼
          ttyd  ──spawns──►  herdr client
@@ -36,7 +36,7 @@ Two ways to use the box:
 | Method | How | Best for |
 |---|---|---|
 | **Native** (best UX) | `herdr --remote vps1` from a local terminal | daily driving from a laptop |
-| **Web** | browser → Tailscale/Cloudflare URL → ttyd → herdr | phones, locked-down machines, no client install |
+| **Web** | browser → `https://herdr.example.com` → ttyd → herdr | phones, locked-down machines, no client install |
 
 The long-form design notes live in
 [`remote-coding-vps-setup.md`](./remote-coding-vps-setup.md).
@@ -54,6 +54,7 @@ The long-form design notes live in
 │   ├── fail2ban/jail.local           # fail2ban sshd jail
 │   ├── systemd/herdr.service         # persistent herdr server (user unit)
 │   ├── systemd/ttyd.service.tmpl     # loopback web terminal (system unit)
+│   ├── systemd/cloudflared.service.tmpl
 │   └── cloudflared/config.yml.example
 ├── remote-coding-vps-setup.md        # the original step-by-step write-up
 ├── LICENSE
@@ -78,6 +79,8 @@ The long-form design notes live in
       IdentityFile ~/.ssh/id_ed25519
   ```
 
+- A domain on Cloudflare (`example.com` in this example).
+
 > **Do not run agents as root.** Create a normal user, or use the cloud image's
 > default user. The scripts refuse to run as root.
 
@@ -90,41 +93,79 @@ From your laptop, in this repo:
 ```
 
 That copies the repo to `~/remote-herdr` on the host and runs `./setup.sh all`
-there: **harden → install → services → ttyd → verify**.
+there: **harden → install → services → ttyd → cloudflared → verify**.
 
 Prefer to run phases one at a time?
 
 ```bash
-./bootstrap.sh vps1 harden      # SSH, firewall, fail2ban, upgrades, sysctl
-./bootstrap.sh vps1 install     # herdr, Node 22, pi, ttyd
-./bootstrap.sh vps1 services    # herdr server as a systemd --user service
-./bootstrap.sh vps1 ttyd        # loopback-only web terminal
-./bootstrap.sh vps1 tailscale   # install Tailscale (login instructions printed)
-./bootstrap.sh vps1 verify      # health checks
+./bootstrap.sh vps1 harden       # SSH, firewall, fail2ban, upgrades, sysctl
+./bootstrap.sh vps1 install      # herdr, Node 22, pi, ttyd
+./bootstrap.sh vps1 services     # herdr server as a systemd --user service
+./bootstrap.sh vps1 ttyd         # loopback-only web terminal
+./bootstrap.sh vps1 cloudflared  # install Cloudflare Tunnel connector for ttyd
+./bootstrap.sh vps1 verify       # health checks
 ```
 
 Everything is **idempotent** — re-run any phase safely.
 
 ### 3. Finish the two interactive steps
 
-These need a human, so they are not automated:
+**a) Authenticate pi** (needs a human):
 
 ```bash
 ssh vps1
-
-# a) Authenticate pi (subscription login or API key)
 pi            # then run:  /login
 #   or:  echo 'export DEEPSEEK_API_KEY=...' >> ~/.bashrc
-
-# b) Log the box into your tailnet (recommended for web access)
-sudo tailscale up --ssh --hostname=vps1
-sudo tailscale serve --bg --https=443 http://127.0.0.1:7681
-sudo ufw delete allow OpenSSH     # only after Tailscale SSH works
 ```
 
-You now have a private HTTPS URL like
-`https://vps1.<your-tailnet>.ts.net` that opens the Herdr workspace in any
-browser on any device in your tailnet.
+**b) Configure the Cloudflare Tunnel.** `setup.sh cloudflared` installs the
+`cloudflared` connector but leaves the tunnel to you. The origin it must reach is
+
+```
+http://127.0.0.1:7681
+```
+
+Two ways to wire it up:
+
+**Dashboard-managed (easiest).** In the Cloudflare dashboard go to
+**Zero Trust → Networks → Tunnels → Create a tunnel → Cloudflared**, add a
+**Public hostname**:
+
+| Field | Value |
+|---|---|
+| Subdomain | `herdr` |
+| Domain | `example.com` |
+| Type | `HTTP` |
+| URL | `127.0.0.1:7681` |
+
+Then copy the connector token and install it on the VPS:
+
+```bash
+ssh vps1
+cd ~/remote-herdr
+TUNNEL_TOKEN='<token from dashboard>' ./setup.sh cloudflared
+sudo systemctl status cloudflared
+```
+
+**Locally-managed (config file).** On the VPS:
+
+```bash
+cloudflared tunnel login
+cloudflared tunnel create vps1
+cloudflared tunnel route dns vps1 herdr.example.com
+cp ~/remote-herdr/files/cloudflared/config.yml.example ~/.cloudflared/config.yml
+# edit ~/.cloudflared/config.yml: set tunnel + credentials-file
+cd ~/remote-herdr && ./setup.sh cloudflared   # installs the service
+```
+
+Then browse to **`https://herdr.example.com`**.
+
+> ⚠️ **Before you share the URL, add a Cloudflare Access policy.** A public
+> hostname pointing at ttyd = a shell on your server for anyone who finds it.
+> Zero Trust → Access → Applications → Self-hosted, hostname
+> `herdr.example.com`, policy `Emails = you@example.com` with MFA/OTP. As
+> defense in depth you can also set `TTYD_CREDENTIAL=user:pass` when running the
+> `ttyd` phase.
 
 ---
 
@@ -141,18 +182,18 @@ TTYD_CREDENTIAL='me:s3cret' ./bootstrap.sh vps1 ttyd   # add HTTP basic auth
 | Variable | Default | Meaning |
 |---|---|---|
 | `TARGET_USER` | current user | User that owns the workspace and runs the services |
-| `TTYD_PORT` | `7681` | Loopback port for ttyd |
+| `TTYD_PORT` | `7681` | Loopback port for ttyd (the tunnel origin) |
 | `SSH_ALLOW_USERS` | `TARGET_USER` | Value written to sshd `AllowUsers` |
 | `TTYD_CREDENTIAL` | *(none)* | Optional `user:pass` basic auth on ttyd |
 | `NODE_MAJOR` | `22` | Node.js major installed from NodeSource (pi needs ≥ 22.19) |
-| `ALLOW_OPENSSH` | `1` | Keep port 22 open in ufw (set `0` once Tailscale SSH works) |
-| `INSTALL_TAILSCALE_UP` | `0` | Run `tailscale up` during the tailscale phase |
-| `TS_HOSTNAME` | short hostname | Tailscale node name |
-| `TS_AUTHKEY` | *(none)* | Tailscale auth key; enables unattended `up` |
+| `ALLOW_OPENSSH` | `1` | Keep port 22 open in ufw |
+| `TUNNEL_HOSTNAME` | `herdr.example.com` | Public hostname the tunnel serves |
+| `TUNNEL_TOKEN` | *(none)* | Dashboard-managed tunnel token; installs the connector service |
+| `TUNNEL_CONFIG` | `~/.cloudflared/config.yml` | Locally-managed tunnel config path |
 
-> `TS_AUTHKEY` is intentionally **not** forwarded by `bootstrap.sh` (it would
+> `TUNNEL_TOKEN` is intentionally **not** forwarded by `bootstrap.sh` (it would
 > leak into the remote process list). Set it on the VPS and run
-> `./setup.sh tailscale` there.
+> `./setup.sh cloudflared` there.
 
 ---
 
@@ -165,7 +206,7 @@ TTYD_CREDENTIAL='me:s3cret' ./bootstrap.sh vps1 ttyd   # add HTTP basic auth
   `KbdInteractiveAuthentication no`, `AuthenticationMethods publickey`,
   `MaxAuthTries 3`, `AllowUsers <you>`, no X11 / agent forwarding / tunnels.
   Validates with `sshd -t` before reloading.
-- `ufw`: default deny inbound, allow outbound, allow OpenSSH (until Tailscale).
+- `ufw`: default deny inbound, allow outbound, allow OpenSSH.
 - `fail2ban`: sshd jail with incremental bans, systemd backend.
 - `unattended-upgrades`: enables daily security updates.
 - `/etc/sysctl.d/99-hardening.conf`: rp_filter, SYN cookies, no redirects, etc.
@@ -191,62 +232,53 @@ TTYD_CREDENTIAL='me:s3cret' ./bootstrap.sh vps1 ttyd   # add HTTP basic auth
   `ttyd -i 127.0.0.1 -p <port> -W ... herdr`.
 - Hardened with `NoNewPrivileges=true` and `PrivateTmp=true`.
 
-### `tailscale`
+### `cloudflared`
 
-- Installs the Tailscale package.
-- If `TS_AUTHKEY`/`INSTALL_TAILSCALE_UP` is set, logs in with `--ssh` and
-  publishes ttyd over `tailscale serve --https=443`. Otherwise prints the two
-  commands to finish manually.
+- Installs the `cloudflared` connector (official `.deb`).
+- With `TUNNEL_TOKEN`: writes `/etc/cloudflared/token.env` (mode `0600`) and a
+  systemd service running `cloudflared tunnel --no-autoupdate run`.
+- With `~/.cloudflared/config.yml`: installs a service running
+  `cloudflared tunnel --no-autoupdate --config <path> run` as your user.
+- Otherwise just installs the binary and prints the origin
+  (`http://127.0.0.1:7681`) and instructions.
 
 ### `verify`
 
-- Checks herdr server status, both services, that port 7681 listens on
+- Checks herdr server status, all three services, that port 7681 listens on
   **127.0.0.1 only**, the ufw rules, and the effective sshd settings.
 
 ---
 
-## Web access: choose one front door
+## Web access: how the tunnel connects
 
-Herdr is a TUI, not a web app. ttyd is what renders it in a browser. **Never
-expose port 7681 to the internet.** Pick a private tunnel:
+Cloudflare terminates TLS at the edge and forwards to your connector, which
+proxies to **ttyd on loopback**. The only value you need is:
 
-### Option A — Tailscale Serve (recommended)
-
-Zero open inbound ports, automatic HTTPS, identity-based access. Only devices in
-your tailnet can reach it.
-
-```bash
-sudo tailscale up --ssh --hostname=vps1
-sudo tailscale serve --bg --https=443 http://127.0.0.1:7681
-sudo tailscale serve status
-sudo ufw delete allow OpenSSH        # Tailscale SSH replaces public SSH
+```
+Service:  http://127.0.0.1:7681
 ```
 
-Tighten access with a tailnet ACL so only your user/device can reach the port.
+Recommended hardening for the public hostname:
 
-### Option B — Cloudflare Tunnel + Access
+1. **Cloudflare Access policy** (Zero Trust → Access → Applications) —
+   email/SSO + MFA. Without it the hostname is public.
+2. **Basic auth on ttyd** — `TTYD_CREDENTIAL=user:pass ./setup.sh ttyd`.
+3. Keep ttyd bound to `127.0.0.1` — never change `-i 127.0.0.1`.
+4. If you ever put Cloudflare in front with "Full" TLS mode, ttyd is still plain
+   HTTP on loopback; `noTLSVerify: true` in the example config covers this.
 
-Use this if you want a browser-only path on devices that can't install Tailscale.
-Auth is enforced by Cloudflare Access (email/SSO/MFA).
+Quick sanity checks from the VPS:
 
 ```bash
-cloudflared tunnel login
-cloudflared tunnel create vps1
-cp files/cloudflared/config.yml.example ~/.cloudflared/config.yml   # edit it
-cloudflared tunnel route dns vps1 herdr.example.com
-sudo cloudflared service install
-sudo systemctl enable --now cloudflared
+curl -sS -o /dev/null -w '%{http_code}\n' http://127.0.0.1:7681   # 200
+sudo journalctl -u cloudflared -n 50 --no-pager
 ```
 
-Then in **Zero Trust → Access → Applications**, add a self-hosted app for
-`herdr.example.com` with a policy that allows only your email **with MFA**.
-Without that policy the tunnel URL is public — **do not skip Access**.
+Quick temporary public URL for testing (no auth — do not leave running):
 
-### Option C — plain 443 (not recommended)
-
-A real cert plus HTTP basic auth and an IP allowlist is the weakest option. A
-terminal on the public internet with only a password *will* be brute-forced.
-Prefer A or B.
+```bash
+cloudflared tunnel --url http://127.0.0.1:7681
+```
 
 ---
 
@@ -274,11 +306,10 @@ detach/close, reopen later — the agent is still running.
       default-deny, fail2ban on.
 - [x] Agents run as a non-root user.
 - [x] ttyd binds `127.0.0.1` only; the port is not in the firewall allowlist.
-- [x] Access path is Tailscale (tailnet ACL) **or** Cloudflare Access — never a
-      bare public URL.
-- [x] TLS everywhere (Tailscale/Cloudflare provide it automatically).
+- [x] Public access goes through a Cloudflare Tunnel, not an open port.
+- [ ] **Cloudflare Access policy on `herdr.example.com`** (email/SSO + MFA).
 - [ ] Optional defense-in-depth: `TTYD_CREDENTIAL=user:pass`.
-- [ ] Review `herdr update` / `npm update -g` regularly.
+- [ ] Review `cloudflared update` / `herdr update` / `npm update -g` regularly.
 - [ ] Back up `~/.pi/agent` (credentials, sessions) and `~/.config/herdr`.
 
 ---
@@ -290,7 +321,9 @@ detach/close, reopen later — the agent is still running.
 | `herdr: command not found` over SSH | Add `~/.local/bin` to `PATH` (the installer does this in `~/.bashrc`); non-login shells may need `export PATH="$HOME/.local/bin:$PATH"` |
 | ttyd page loads but herdr exits | Herdr client can't find the server socket. Check `systemctl --user status herdr` and that `~/.config/herdr/herdr.sock` exists |
 | `systemctl --user` fails over SSH | `export XDG_RUNTIME_DIR=/run/user/$(id -u)` |
-| Locked out after `ALLOW_OPENSSH=0` | Use the provider's console / Tailscale SSH to re-enable: `sudo ufw allow OpenSSH` |
+| Tunnel shows 502 / bad gateway | ttyd isn't up or is on the wrong port: `ss -ltnp \| grep 7681`, `systemctl status ttyd`, ensure the tunnel origin is `http://127.0.0.1:7681` |
+| `cloudflared` service not present | No tunnel configured yet; run `TUNNEL_TOKEN=... ./setup.sh cloudflared` or create `~/.cloudflared/config.yml` then re-run |
+| Check connector logs | `sudo journalctl -u cloudflared -n 100 --no-pager` |
 | pi won't start | pi needs Node ≥ 22.19: `node -v`, else re-run `./setup.sh install` |
 | Reboot didn't restart services | `sudo loginctl enable-linger $USER`; check `systemctl --user is-enabled herdr` |
 
@@ -300,6 +333,8 @@ detach/close, reopen later — the agent is still running.
 
 ```bash
 # services
+sudo systemctl disable --now cloudflared 2>/dev/null
+sudo rm -f /etc/systemd/system/cloudflared.service /etc/cloudflared/token.env
 sudo systemctl disable --now ttyd
 sudo rm -f /etc/systemd/system/ttyd.service
 systemctl --user disable --now herdr
@@ -312,7 +347,9 @@ sudo rm -f /etc/fail2ban/jail.local
 sudo systemctl reload ssh && sudo systemctl restart fail2ban
 
 # ufw stays configured; disable with: sudo ufw disable
+
 # binaries
+sudo apt-get remove --purge -y cloudflared
 rm -f ~/.local/bin/herdr
 sudo npm uninstall -g @earendil-works/pi-coding-agent
 ```

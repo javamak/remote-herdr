@@ -8,7 +8,7 @@ Wants=network-online.target
 User=@@USER@@
 Environment=TERM=xterm-256color
 Environment=HOME=@@HOME@@
-# Loopback only. The tunnel (Tailscale/Cloudflare) is what exposes it.
+# Loopback only. The Cloudflare Tunnel is what exposes it.
 ExecStart=@@TTYD_BIN@@ -i 127.0.0.1 -p @@PORT@@ -W -t titleFixed=Herdr@@CRED@@ @@HERDR_BIN@@
 Restart=on-failure
 RestartSec=2

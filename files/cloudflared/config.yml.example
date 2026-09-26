@@ -1,15 +1,23 @@
-# Example cloudflared config for exposing ttyd privately through Cloudflare
-# Access. Copy to ~/.cloudflared/config.yml and fill in the placeholders.
+# Example cloudflared config for a LOCALLY-MANAGED tunnel.
 #
-# IMPORTANT: without a Cloudflare Access policy this URL is PUBLIC.
-# Add a Zero Trust -> Access -> Applications policy before using it.
+# Copy to ~/.cloudflared/config.yml and fill in the tunnel UUID.
+# Then:  sudo systemctl restart cloudflared   (or re-run ./setup.sh cloudflared)
+#
+# The only thing the tunnel needs to reach is ttyd on loopback:
+#   http://127.0.0.1:7681
+#
+# IMPORTANT: this hostname exposes a shell (herdr -> your user). Add a
+# Zero Trust -> Access -> Applications policy for the hostname BEFORE using it,
+# and/or set TTYD_CREDENTIAL=user:pass. Never leave it open to the internet.
 
-tunnel: vps1
+tunnel: REPLACE-WITH-TUNNEL-NAME-OR-UUID
 credentials-file: /home/ubuntu/.cloudflared/REPLACE-WITH-TUNNEL-UUID.json
 
 ingress:
   - hostname: herdr.example.com
     service: http://127.0.0.1:7681
     originRequest:
+      # ttyd serves plain HTTP on loopback; keep the tunnel to loopback too.
       noTLSVerify: true
+      connectTimeout: 30s
   - service: http_status:404

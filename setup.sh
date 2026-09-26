@@ -11,7 +11,7 @@
 #   ./setup.sh install      # herdr, node, pi, ttyd
 #   ./setup.sh services     # herdr user service + linger
 #   ./setup.sh ttyd         # loopback-only ttyd service
-#   ./setup.sh tailscale    # install Tailscale (and `up` if TS_AUTHKEY is set)
+#   ./setup.sh cloudflared  # install Cloudflare Tunnel connector for ttyd
 #   ./setup.sh verify       # checks
 #
 # Configuration (env vars):
@@ -21,9 +21,9 @@
 #   TTYD_CREDENTIAL    optional HTTP basic auth u:p     (default: none)
 #   NODE_MAJOR         Node.js major to install         (default: 22)
 #   ALLOW_OPENSSH      1 = keep public SSH open in ufw  (default: 1)
-#   INSTALL_TAILSCALE_UP 1 = run `tailscale up` in the tailscale phase
-#   TS_AUTHKEY         Tailscale auth key (also enables `up`)
-#   TS_HOSTNAME        Tailscale node name              (default: short hostname)
+#   TUNNEL_HOSTNAME    public hostname served by tunnel (default: herdr.example.com)
+#   TUNNEL_TOKEN       dashboard-managed tunnel token  (optional)
+#   TUNNEL_CONFIG      locally-managed config.yml path  (default: ~/.cloudflared/config.yml)
 #
 # It is safe to re-run: every step is idempotent.
 
@@ -38,9 +38,9 @@ SSH_ALLOW_USERS="${SSH_ALLOW_USERS:-$TARGET_USER}"
 TTYD_CREDENTIAL="${TTYD_CREDENTIAL:-}"
 NODE_MAJOR="${NODE_MAJOR:-22}"
 ALLOW_OPENSSH="${ALLOW_OPENSSH:-1}"
-INSTALL_TAILSCALE_UP="${INSTALL_TAILSCALE_UP:-0}"
-TS_AUTHKEY="${TS_AUTHKEY:-}"
-TS_HOSTNAME="${TS_HOSTNAME:-$(hostname -s)}"
+TUNNEL_HOSTNAME="${TUNNEL_HOSTNAME:-herdr.example.com}"
+TUNNEL_TOKEN="${TUNNEL_TOKEN:-}"
+TUNNEL_CONFIG="${TUNNEL_CONFIG:-$HOME/.cloudflared/config.yml}"
 
 log()  { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m[!]\033[0m %s\n' "$*" >&2; }
@@ -86,7 +86,7 @@ phase_harden() {
   if [ "$ALLOW_OPENSSH" = "1" ]; then
     sudo ufw allow OpenSSH >/dev/null
   else
-    warn "ALLOW_OPENSSH=0 — make sure you have another way in (e.g. Tailscale SSH) before disconnecting!"
+    warn "ALLOW_OPENSSH=0 — make sure you have another way in (e.g. provider console) before disconnecting!"
   fi
   sudo ufw --force enable >/dev/null
 
@@ -209,33 +209,86 @@ phase_ttyd() {
 }
 
 # ---------------------------------------------------------------------------
-# Phase 5 — Tailscale (private HTTPS front door)
+# Phase 5 — Cloudflare Tunnel (public HTTPS front door for ttyd)
 # ---------------------------------------------------------------------------
-phase_tailscale() {
-  if ! command -v tailscale >/dev/null 2>&1; then
-    log "Installing Tailscale"
-    curl -fsSL https://tailscale.com/install.sh | sh
+phase_cloudflared() {
+  local origin="http://127.0.0.1:${TTYD_PORT}"
+  local bin execstart user_line env_line tmp
+
+  if ! command -v cloudflared >/dev/null 2>&1; then
+    log "Installing cloudflared"
+    local deb="/tmp/cloudflared-linux-amd64.deb"
+    curl -fsSL -o "$deb" \
+      https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
+    sudo apt-get install -y "$deb"
+    rm -f "$deb"
   else
-    log "Tailscale already installed"
+    log "cloudflared already installed: $(cloudflared --version)"
+  fi
+  bin="$(command -v cloudflared)"
+
+  tmp="$(mktemp)"
+  if [ -n "$TUNNEL_TOKEN" ]; then
+    log "Configuring dashboard-managed tunnel (token)"
+    sudo install -d -m 0755 /etc/cloudflared
+    printf 'TUNNEL_TOKEN=%s\n' "$TUNNEL_TOKEN" | sudo tee /etc/cloudflared/token.env >/dev/null
+    sudo chmod 0600 /etc/cloudflared/token.env
+    user_line=""
+    env_line="EnvironmentFile=/etc/cloudflared/token.env"
+    execstart="${bin} tunnel --no-autoupdate run"
+  elif [ -f "$TUNNEL_CONFIG" ]; then
+    log "Configuring locally-managed tunnel from ${TUNNEL_CONFIG}"
+    user_line="User=${TARGET_USER}"
+    env_line=""
+    execstart="${bin} tunnel --no-autoupdate --config ${TUNNEL_CONFIG} run"
+  else
+    warn "cloudflared installed, but no tunnel is configured yet."
+    cloudflared_instructions "$origin"
+    rm -f "$tmp"
+    return 0
   fi
 
-  if [ -n "$TS_AUTHKEY" ] || [ "$INSTALL_TAILSCALE_UP" = "1" ]; then
-    log "Bringing Tailscale up"
-    if [ -n "$TS_AUTHKEY" ]; then
-      sudo tailscale up --ssh --hostname="$TS_HOSTNAME" --authkey="$TS_AUTHKEY"
-    else
-      sudo tailscale up --ssh --hostname="$TS_HOSTNAME"
-    fi
-    log "Publishing ttyd over Tailscale Serve (HTTPS)"
-    sudo tailscale serve --bg --https=443 "http://127.0.0.1:${TTYD_PORT}"
-    sudo tailscale serve status || true
-    log "Now you can remove the public SSH rule:  sudo ufw delete allow OpenSSH"
-  else
-    warn "Tailscale installed but not logged in. Finish with:"
-    warn "  sudo tailscale up --ssh --hostname=${TS_HOSTNAME}"
-    warn "  sudo tailscale serve --bg --https=443 http://127.0.0.1:${TTYD_PORT}"
-    warn "  sudo ufw delete allow OpenSSH     # once Tailscale SSH works"
-  fi
+  sed -e "s|@@USER_LINE@@|${user_line}|g" \
+      -e "s|@@ENV_LINE@@|${env_line}|g" \
+      -e "s|@@EXECSTART@@|${execstart}|g" \
+      "$FILES_DIR/systemd/cloudflared.service.tmpl" > "$tmp"
+  sudo install -m 0644 "$tmp" /etc/systemd/system/cloudflared.service
+  rm -f "$tmp"
+
+  sudo systemctl daemon-reload
+  sudo systemctl enable --now cloudflared >/dev/null 2>&1 || true
+  sudo systemctl restart cloudflared
+  sudo systemctl --no-pager --lines=0 status cloudflared || true
+
+  cloudflared_instructions "$origin"
+}
+
+cloudflared_instructions() {
+  local origin="$1"
+  cat <<EOF
+
+  >>> Point your Cloudflare Tunnel at the ttyd origin (loopback only):
+
+        hostname : ${TUNNEL_HOSTNAME}
+        service  : ${origin}
+
+      Dashboard-managed tunnel:
+        Zero Trust -> Networks -> Tunnels -> your tunnel -> Public Hostname
+        add  ${TUNNEL_HOSTNAME}  ->  Type HTTP  ->  URL  ${origin}
+        then copy the connector token and run on this host:
+          TUNNEL_TOKEN=<token> ./setup.sh cloudflared
+
+      Locally-managed tunnel:
+        cp files/cloudflared/config.yml.example ~/.cloudflared/config.yml
+        cloudflared tunnel login
+        cloudflared tunnel create vps1
+        cloudflared tunnel route dns vps1 ${TUNNEL_HOSTNAME}
+        ./setup.sh cloudflared        # installs/refreshes the service
+
+      SECURITY: ${TUNNEL_HOSTNAME} reaches a full shell. Add a
+      Zero Trust -> Access -> Applications policy for it (email/SSO + MFA)
+      BEFORE sharing the URL, and/or set TTYD_CREDENTIAL=user:pass.
+EOF
 }
 
 # ---------------------------------------------------------------------------
@@ -248,15 +301,21 @@ phase_verify() {
   systemctl --user --no-pager --lines=0 status herdr 2>&1 | head -5 || true
   echo "--- ttyd ---"
   systemctl --no-pager --lines=0 status ttyd 2>&1 | head -5 || true
-  echo "--- listeners (7681 must be 127.0.0.1 only) ---"
+  echo "--- listeners (${TTYD_PORT} must be 127.0.0.1 only) ---"
   ss -ltnp 2>/dev/null | grep -E ":${TTYD_PORT}\b" || echo "  (nothing on ${TTYD_PORT})"
+  echo "--- cloudflared ---"
+  if systemctl list-unit-files 2>/dev/null | grep -q '^cloudflared\.service'; then
+    systemctl --no-pager --lines=0 status cloudflared 2>&1 | head -5 || true
+  else
+    echo "  cloudflared service not installed (run: ./setup.sh cloudflared)"
+  fi
   echo "--- ufw ---"
   sudo ufw status verbose | sed 's/^/  /'
   echo "--- sshd ---"
   sudo sshd -T | grep -E '^(permitrootlogin|passwordauthentication|kbdinteractiveauthentication|allowusers|maxauthtries) ' | sed 's/^/  /'
   echo
   log "Done. Native: from your laptop run  herdr machine add --label $(hostname -s) ${TARGET_USER}@$(hostname -s)  then  herdr --remote $(hostname -s)"
-  log "Web: expose http://127.0.0.1:${TTYD_PORT} via Tailscale Serve or Cloudflare Access. Never open the port publicly."
+  log "Web: Cloudflare Tunnel -> ${TUNNEL_HOSTNAME} -> http://127.0.0.1:${TTYD_PORT} (loopback only). Protect it with Cloudflare Access."
 }
 
 usage() {
@@ -270,11 +329,11 @@ main() {
     install)   require_sudo; phase_install ;;
     services)  require_sudo; phase_services ;;
     ttyd)      require_sudo; phase_ttyd ;;
-    tailscale) require_sudo; phase_tailscale ;;
+    cloudflared) require_sudo; phase_cloudflared ;;
     verify)    require_sudo; phase_verify ;;
-    all)       require_sudo; phase_harden; phase_install; phase_services; phase_ttyd; phase_verify ;;
+    all)       require_sudo; phase_harden; phase_install; phase_services; phase_ttyd; phase_cloudflared; phase_verify ;;
     -h|--help|help) usage ;;
-    *) die "unknown command: $1 (try: harden|install|services|ttyd|tailscale|verify|all)" ;;
+    *) die "unknown command: $1 (try: harden|install|services|ttyd|cloudflared|verify|all)" ;;
   esac
 }
 
